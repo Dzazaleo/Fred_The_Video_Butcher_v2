@@ -3,22 +3,36 @@ import { VideoDropZone } from './components/VideoDropZone';
 import { VideoPreview } from './components/VideoPreview';
 import { ReferenceImageDropZone } from './components/ReferenceImageDropZone';
 import { ResultsPanel } from './components/ResultsPanel';
+import { ExportControl } from './components/ExportControl';
 import { VideoAsset, ReferenceAsset } from './types';
 import { Clapperboard, Play, Sparkles } from 'lucide-react';
 import { Button } from './components/Button';
 import { useVisionEngine } from './hooks/useVisionEngine';
+import { useVideoProcessor } from './hooks/useVideoProcessor';
+import { Range } from './utils/ffmpegBuilder';
 
 const App: React.FC = () => {
   const [activeAsset, setActiveAsset] = useState<VideoAsset | null>(null);
   const [referenceAsset, setReferenceAsset] = useState<ReferenceAsset | null>(null);
+  const [videoDuration, setVideoDuration] = useState<number>(0);
   
+  // Vision Engine Hook
   const { 
-    isProcessing, 
-    progress, 
-    status, 
+    isProcessing: isVisionProcessing, 
+    progress: visionProgress, 
+    status: visionStatus, 
     detections, 
-    processVideo 
+    processVideo: runVision 
   } = useVisionEngine();
+
+  // FFmpeg Processor Hook
+  const {
+    processVideo: exportVideo,
+    isProcessing: isExporting,
+    progress: exportProgress,
+    status: exportStatus,
+    isReady: isEngineReady
+  } = useVideoProcessor();
 
   // Critical Memory Management: Cleanup object URL when component unmounts or asset changes
   useEffect(() => {
@@ -35,6 +49,14 @@ const App: React.FC = () => {
       URL.revokeObjectURL(activeAsset.previewUrl);
     }
     setActiveAsset({ file, previewUrl: url });
+
+    // Capture duration for timeline calculations
+    const vid = document.createElement('video');
+    vid.preload = 'metadata';
+    vid.src = url;
+    vid.onloadedmetadata = () => {
+      setVideoDuration(vid.duration);
+    };
   }, [activeAsset]);
 
   const handleReferenceSelected = useCallback((file: File, url: string) => {
@@ -43,15 +65,72 @@ const App: React.FC = () => {
 
   const handleRemoveVideo = useCallback(() => {
     setActiveAsset(null); 
+    setVideoDuration(0);
   }, []);
 
   const handleStartProcessing = () => {
     if (activeAsset && referenceAsset) {
-      processVideo(activeAsset.previewUrl, referenceAsset.previewUrl);
+      runVision(activeAsset.previewUrl, referenceAsset.previewUrl);
     } else {
       alert("Please upload both video footage and a reference screenshot.");
     }
   };
+
+  /**
+   * Calculates the "Keep" ranges by inverting the detection ranges.
+   * Logic: The detections are the "bad" parts (menus). We want everything else.
+   */
+  const getKeepRanges = useCallback((): Range[] => {
+    if (!videoDuration) return [];
+    
+    // If no detections found (and scan is complete), keep the whole video
+    if (detections.length === 0) {
+       return [{ start: 0, end: videoDuration }];
+    }
+
+    const sortedDetections = [...detections].sort((a, b) => a.start - b.start);
+    const keep: Range[] = [];
+    let currentCursor = 0;
+
+    sortedDetections.forEach(det => {
+      // Add segment before the detection if it's long enough (> 0.1s)
+      if (det.start > currentCursor + 0.1) {
+        keep.push({ start: currentCursor, end: det.start });
+      }
+      currentCursor = Math.max(currentCursor, det.end);
+    });
+
+    // Add final segment after last detection
+    if (currentCursor < videoDuration - 0.1) {
+      keep.push({ start: currentCursor, end: videoDuration });
+    }
+    
+    return keep;
+  }, [detections, videoDuration]);
+
+  const handleExport = async () => {
+    if (!activeAsset) return;
+    
+    const keepRanges = getKeepRanges();
+    if (keepRanges.length === 0) {
+      alert("No clean footage remaining to export.");
+      return;
+    }
+
+    const blobUrl = await exportVideo(activeAsset.file, keepRanges);
+    
+    if (blobUrl) {
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `clean_${activeAsset.file.name}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Optional: revoke blobUrl after a delay? handled by browser usually but good practice if stored
+    }
+  };
+
+  const keepRanges = getKeepRanges();
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col">
@@ -64,7 +143,13 @@ const App: React.FC = () => {
             </div>
             <h1 className="text-xl font-bold text-slate-100 tracking-tight">Studio<span className="text-blue-500">Ingest</span></h1>
           </div>
-          <div className="text-sm text-slate-500">v1.2.0</div>
+          <div className="flex items-center gap-4 text-sm text-slate-500">
+             <div className="flex items-center gap-1">
+               <span className={`w-2 h-2 rounded-full ${isEngineReady ? 'bg-green-500' : 'bg-amber-500'}`}></span>
+               <span>Engine {isEngineReady ? 'Ready' : 'Loading'}</span>
+             </div>
+             <span>v1.2.0</span>
+          </div>
         </div>
       </header>
 
@@ -92,12 +177,23 @@ const App: React.FC = () => {
               )}
               
               {/* Results Section */}
-              {status !== 'idle' && (
+              {visionStatus !== 'idle' && (
                 <ResultsPanel 
-                  status={status} 
-                  progress={progress} 
+                  status={visionStatus} 
+                  progress={visionProgress} 
                   detections={detections} 
                 />
+              )}
+
+              {/* Export Control */}
+              {visionStatus === 'completed' && activeAsset && (
+                 <ExportControl 
+                    keepRanges={keepRanges}
+                    onExport={handleExport}
+                    isProcessing={isExporting}
+                    progress={exportProgress}
+                    status={exportStatus}
+                 />
               )}
             </div>
 
@@ -123,10 +219,10 @@ const App: React.FC = () => {
                   
                   <Button 
                     className="w-full flex items-center justify-center gap-2" 
-                    disabled={!activeAsset || !referenceAsset || isProcessing}
+                    disabled={!activeAsset || !referenceAsset || isVisionProcessing || isExporting}
                     onClick={handleStartProcessing}
                   >
-                    {isProcessing ? (
+                    {isVisionProcessing ? (
                       <>Processing...</>
                     ) : (
                       <>
