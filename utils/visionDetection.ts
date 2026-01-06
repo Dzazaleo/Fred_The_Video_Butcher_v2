@@ -11,21 +11,27 @@ declare var cv: any;
  * 2. Find candidates using MENU_DARK (Background).
  * 3. SPATIAL LOCK: Check Intersection over Union (IoU) > 0.3.
  * 4. TRIAD CHECK: Confirm presence of MENU_LIGHT and TEXT_WHITE (> 1% density).
+ * 
+ * Memory Management:
+ * - Treats srcFrame as READ ONLY (never deleted).
+ * - Strictly deletes all internal Mats in a finally block.
  */
 export function scanFrame(srcFrame: any, profile: VisionProfile, debugMode: boolean = false): boolean {
   if (typeof cv === 'undefined') return false;
 
   let detected = false;
 
-  // Mats to cleanup
+  // --- Mats to cleanup (Function Scope) ---
   let hsv: any = null;
   let maskDark: any = null;
   let contours: any = null;
   let hierarchy: any = null;
+  
+  // Color bounds matrices
   let lowP: any = null;
   let highP: any = null;
-  
-  // Inner loop Mats
+
+  // --- Mats to cleanup (Loop Scope, managed carefully) ---
   let roi: any = null;
   let maskLight: any = null;
   let maskWhite: any = null;
@@ -39,68 +45,53 @@ export function scanFrame(srcFrame: any, profile: VisionProfile, debugMode: bool
     const fh = srcFrame.rows;
 
     // --- Step 1: Projection (Resolution Independence) ---
-    // Project the normalized reference box onto the current frame's dimensions
     const nb = profile.spatial.normalizedBox;
     const expectedRect = {
       x: Math.floor(nb.x * fw),
       y: Math.floor(nb.y * fh),
-      width: Math.floor(nb.w * fw), // Note: OpenCV uses 'width', 'height' in boundingRect
+      width: Math.floor(nb.w * fw),
       height: Math.floor(nb.h * fh)
     };
-
-    if (debugMode) {
-      // Very verbose log, uncomment if needed for deep debugging
-      // console.log(`[Detection] Frame: ${fw}x${fh}. Expected Target:`, expectedRect);
-    }
 
     // --- Step 2: Background Segmentation ---
     hsv = new cv.Mat();
     cv.cvtColor(srcFrame, hsv, cv.COLOR_RGBA2RGB);
     cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
+    // Create threshold scalars/mats for Background
     lowP = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), profile.bounds.dark.lower);
     highP = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), profile.bounds.dark.upper);
     maskDark = new cv.Mat();
     
     cv.inRange(hsv, lowP, highP, maskDark);
 
-    if (debugMode) {
-      const pixelCount = cv.countNonZero(maskDark);
-      if (pixelCount > 0) {
-        const total = fw * fh;
-        // console.log(`[Detection] Dark Mask Pixels: ${pixelCount} (${((pixelCount/total)*100).toFixed(2)}%)`);
-      }
-    }
-
     contours = new cv.MatVector();
     hierarchy = new cv.Mat();
     cv.findContours(maskDark, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    // --- Step 3: Spatial Lock & Verification ---
+    // --- Step 3: Spatial Lock & Verification Loop ---
     for (let i = 0; i < contours.size(); ++i) {
       const contour = contours.get(i);
       const rect = cv.boundingRect(contour);
       
-      // Calculate IoU (Intersection over Union)
       const iou = calculateIoU(rect, expectedRect);
 
       // Relaxed Rule: IoU > 0.3 (30% overlap)
       if (iou < 0.3) {
-        // if (debugMode && iou > 0.1) console.log(`[Detection] Spatial Mismatch. IoU: ${iou.toFixed(2)}`);
-        continue; // REJECT
+        continue; // Next contour
       }
 
       if (debugMode) {
         console.log(`[Detection] Spatial Match! IoU: ${iou.toFixed(2)} at [${rect.x}, ${rect.y}]`);
       }
 
-      // --- Step 4: Triad Check (Internal Validation) ---
-      // We have the body, now check for "Light Purple" and "White Text" inside
+      // --- Step 4: Triad Check (ROI) ---
+      // Inner try/finally to ensure loop resources are cleaned even if logic throws or we break
       try {
         roi = hsv.roi(rect);
         const area = rect.width * rect.height;
 
-        // Check A: Menu Light (Header/Selection)
+        // Check A: Menu Light
         lowL = new cv.Mat(roi.rows, roi.cols, roi.type(), profile.bounds.light.lower);
         highL = new cv.Mat(roi.rows, roi.cols, roi.type(), profile.bounds.light.upper);
         maskLight = new cv.Mat();
@@ -122,21 +113,15 @@ export function scanFrame(srcFrame: any, profile: VisionProfile, debugMode: bool
           console.log(`[Detection] Triad Density - Light: ${(lightRatio*100).toFixed(2)}%, White: ${(whiteRatio*100).toFixed(2)}%`);
         }
 
-        // RULE: Both must be present (> 1% coverage per requirement)
         if (lightRatio > 0.01 && whiteRatio > 0.01) {
           detected = true;
-          
-          // Cleanup loop vars before breaking
-          maskLight.delete(); maskWhite.delete();
-          lowL.delete(); highL.delete();
-          lowW.delete(); highW.delete();
-          roi.delete();
-          // Clear refs
-          maskLight = null; maskWhite = null; roi = null;
-          break; 
+          // Break, but cleanup happens in finally block below before next iteration logic or exit
         }
 
-        // Cleanup if not detected
+      } catch (err) {
+        console.warn("ROI Detection Error", err);
+      } finally {
+        // Strict Cleanup for Loop Vars
         if (maskLight) { maskLight.delete(); maskLight = null; }
         if (maskWhite) { maskWhite.delete(); maskWhite = null; }
         if (lowL) { lowL.delete(); lowL = null; }
@@ -144,15 +129,17 @@ export function scanFrame(srcFrame: any, profile: VisionProfile, debugMode: bool
         if (lowW) { lowW.delete(); lowW = null; }
         if (highW) { highW.delete(); highW = null; }
         if (roi) { roi.delete(); roi = null; }
-
-      } catch (err) {
-        console.warn("ROI Check Error", err);
       }
+
+      if (detected) break;
     }
 
   } catch (err) {
     console.error("scanFrame Error", err);
   } finally {
+    // --- Final Cleanup ---
+    // Note: We DO NOT delete srcFrame here. It belongs to the caller.
+    
     if (hsv) hsv.delete();
     if (maskDark) maskDark.delete();
     if (contours) contours.delete();
@@ -160,7 +147,7 @@ export function scanFrame(srcFrame: any, profile: VisionProfile, debugMode: bool
     if (lowP) lowP.delete();
     if (highP) highP.delete();
     
-    // Ensure inner loop mats are gone if error/break occurred
+    // Safety check: Ensure loop vars are gone if the loop exited weirdly
     if (roi) roi.delete();
     if (maskLight) maskLight.delete();
     if (maskWhite) maskWhite.delete();

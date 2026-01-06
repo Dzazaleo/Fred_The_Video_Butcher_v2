@@ -146,35 +146,47 @@ export const useVisionEngine = () => {
 
         if (signal.aborted) break;
 
-        // 2. Draw Frame to Canvas
-        ctx.drawImage(video, 0, 0, processWidth, processHeight);
-        
-        // 3. Read Pixels into OpenCV Mat
-        const imageData = ctx.getImageData(0, 0, processWidth, processHeight);
-        const mat = cv.matFromImageData(imageData);
+        // 2. Process Frame with Strict Memory Management
+        let mat: any = null;
 
-        // 4. Run Detection Algorithm with Debug Enabled
-        const isDetected = scanFrame(mat, profile, true);
-        
-        // Strict cleanup of frame mat
-        mat.delete();
+        try {
+          // Draw Frame to Canvas
+          ctx.drawImage(video, 0, 0, processWidth, processHeight);
+          
+          // Read Pixels into OpenCV Mat
+          const imageData = ctx.getImageData(0, 0, processWidth, processHeight);
+          mat = cv.matFromImageData(imageData);
 
-        // 5. Handle Result
-        if (isDetected) {
-           const event = { timestamp: currentTime, confidence: 1.0 };
-           newDetections.push(event);
-           // Real-time update
-           setState(prev => ({ 
-             ...prev, 
-             detections: [...newDetections] 
-           }));
+          // Run Detection Algorithm
+          // Note: scanFrame treats 'mat' as Read-Only.
+          const isDetected = scanFrame(mat, profile, true);
+          
+          if (isDetected) {
+             const event = { timestamp: currentTime, confidence: 1.0 };
+             newDetections.push(event);
+             
+             // Real-time update
+             setState(prev => ({ 
+               ...prev, 
+               detections: [...newDetections] 
+             }));
+          }
+        } catch (frameError) {
+          console.warn(`[VisionEngine] Error processing frame at ${currentTime}:`, frameError);
+        } finally {
+          // CRITICAL: Always clean up the frame matrix
+          // This prevents memory leaks from accumulating over hundreds of frames
+          if (mat) {
+             mat.delete(); 
+             mat = null;
+          }
         }
 
-        // 6. Update Progress
+        // 3. Update Progress & Yield
         const progress = Math.min(100, Math.round((currentTime / duration) * 100));
         setState(prev => ({ ...prev, progress }));
 
-        // 7. Yield to main thread (prevent UI freeze)
+        // Yield to main thread to keep UI responsive
         await new Promise(r => setTimeout(r, 0));
 
         // Advance cursor
