@@ -8,14 +8,14 @@ export interface VisionProfile {
     light: { lower: number[]; upper: number[] };
     white: { lower: number[]; upper: number[] };
   };
-  // Spatial Template for Position Locking
+  // Spatial Template for Position Locking (Normalized 0.0 - 1.0)
   spatial: {
     normalizedBox: { x: number; y: number; w: number; h: number };
     aspectRatio: number;
   };
 }
 
-// Hardcoded Strict Colors (RGB)
+// Hardcoded Robust Colors (RGB)
 const TARGET_COLORS = {
   MENU_DARK: [14, 4, 49],   // Deep Purple Background
   MENU_LIGHT: [50, 4, 139], // Lighter Purple Selection Bar
@@ -29,7 +29,7 @@ interface HSVRange {
 
 /**
  * Helper to convert RGB to OpenCV HSV (H: 0-180, S: 0-255, V: 0-255)
- * Adds strict tolerances to create a detection range.
+ * Adds tolerances to create a detection range.
  */
 function getHsvRange(rgb: number[], tolerance = { h: 10, s: 40, v: 40 }): HSVRange {
   const r = rgb[0] / 255;
@@ -80,7 +80,7 @@ function getHsvRange(rgb: number[], tolerance = { h: 10, s: 40, v: 40 }): HSVRan
  * Algorithm:
  * 1. Convert Image to HSV.
  * 2. Filter for MENU_DARK to find the menu body.
- * 3. Extract geometric properties (Position, Size).
+ * 3. Extract geometric properties and NORMALIZE them (0.0-1.0).
  * 4. Package with pre-calculated color bounds for detection.
  */
 export function calibrateReference(image: HTMLImageElement): VisionProfile {
@@ -88,22 +88,27 @@ export function calibrateReference(image: HTMLImageElement): VisionProfile {
     throw new Error("OpenCV is not loaded yet.");
   }
 
-  // 1. Prepare Color Bounds
-  const darkBounds = getHsvRange(TARGET_COLORS.MENU_DARK, { h: 10, s: 50, v: 50 });
-  const lightBounds = getHsvRange(TARGET_COLORS.MENU_LIGHT, { h: 10, s: 50, v: 50 });
+  // 1. Prepare Color Bounds (Robust Tolerances)
+  // Dark Purple: Wide tolerance for low-light volatility
+  const darkBounds = getHsvRange(TARGET_COLORS.MENU_DARK, { h: 20, s: 50, v: 50 });
   
-  // White is special: Low Saturation, High Value
+  // Light Purple: Standard tolerance
+  const lightBounds = getHsvRange(TARGET_COLORS.MENU_LIGHT, { h: 15, s: 50, v: 50 });
+  
+  // White: Low Saturation (<30), High Value (>200)
   const whiteBounds = {
-    lower: [0, 0, 180, 0],
-    upper: [180, 60, 255, 255]
+    lower: [0, 0, 200, 0],
+    upper: [180, 30, 255, 255]
   };
 
-  // 2. Load Image & Find Geometry
   const src = cv.imread(image);
   const hsv = new cv.Mat();
   const mask = new cv.Mat();
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
+
+  // Debug Telemetry: Resolution
+  console.log(`[Calibration] Reference Res: ${src.cols}x${src.rows}`);
 
   let spatial = {
     normalizedBox: { x: 0, y: 0, w: 0, h: 0 },
@@ -114,7 +119,7 @@ export function calibrateReference(image: HTMLImageElement): VisionProfile {
     cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
     cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-    // Apply MENU_DARK Filter
+    // Filter MENU_DARK
     const lowScalar = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), darkBounds.lower);
     const highScalar = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), darkBounds.upper);
     
@@ -137,7 +142,14 @@ export function calibrateReference(image: HTMLImageElement): VisionProfile {
       }
     }
 
-    if (bestRect && maxArea > 100) {
+    const totalPixels = src.cols * src.rows;
+    // Threshold: 1% of screen area to be considered a menu
+    if (bestRect && maxArea > (totalPixels * 0.01)) {
+      
+      // Log Detected Box (Pixels)
+      console.log(`[Calibration] Detected Menu Box: x=${bestRect.x}, y=${bestRect.y}, w=${bestRect.width}, h=${bestRect.height}`);
+
+      // CRITICAL: Normalization
       spatial = {
         normalizedBox: {
           x: bestRect.x / src.cols,
@@ -147,11 +159,18 @@ export function calibrateReference(image: HTMLImageElement): VisionProfile {
         },
         aspectRatio: bestRect.width / bestRect.height
       };
+
+      // Log Normalized Profile
+      console.log(`[Calibration] Normalized Profile: x=${spatial.normalizedBox.x.toFixed(4)}, y=${spatial.normalizedBox.y.toFixed(4)}, w=${spatial.normalizedBox.w.toFixed(4)}, h=${spatial.normalizedBox.h.toFixed(4)}`);
+
     } else {
-      console.warn("Calibration: Could not detect Menu Background.");
+      console.error(`[Calibration] FAILED. Max Area: ${maxArea} (Threshold: ${totalPixels * 0.01})`);
+      throw new Error("Calibration failed: Could not detect the menu box in the reference image.");
     }
+
   } catch (e) {
     console.error("Calibration Error:", e);
+    throw e;
   } finally {
     src.delete();
     hsv.delete();

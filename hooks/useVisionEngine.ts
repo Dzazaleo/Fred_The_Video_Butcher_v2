@@ -153,8 +153,8 @@ export const useVisionEngine = () => {
         const imageData = ctx.getImageData(0, 0, processWidth, processHeight);
         const mat = cv.matFromImageData(imageData);
 
-        // 4. Run Detection Algorithm
-        const isDetected = scanFrame(mat, profile);
+        // 4. Run Detection Algorithm with Debug Enabled
+        const isDetected = scanFrame(mat, profile, true);
         
         // Strict cleanup of frame mat
         mat.delete();
