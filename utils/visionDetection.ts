@@ -3,141 +3,141 @@ import { VisionProfile } from './visionCalibration';
 // Access global OpenCV instance
 declare var cv: any;
 
-export interface ScanConfig {
-  matchingThreshold: number; // Density threshold (e.g., 0.05 for 5%)
-}
-
 /**
- * Scans a single video frame for the target UI element defined in the profile.
+ * Scans a frame using strict Spatial Locking and Color Triad verification.
  * 
- * Algorithm:
- * 1. Color Segmentation (Purple Mask)
- * 2. Geometric Filtering (Area & Aspect Ratio vs Profile)
- * 3. Content Verification (White Text Density)
- * 
- * @param srcFrame - The current video frame (cv.Mat)
- * @param profile - The calibration data (Color bounds + Geometry)
- * @param config - Detection thresholds
- * @returns true if the target is detected
+ * Logic:
+ * 1. Find candidates using MENU_DARK (Background).
+ * 2. SPATIAL LOCK: Reject if candidate is not in the same relative position as the reference.
+ * 3. TRIAD CHECK: Confirm presence of MENU_LIGHT (Header/Selection) and TEXT_WHITE.
  */
-export function scanFrame(
-  srcFrame: any, 
-  profile: VisionProfile, 
-  config: ScanConfig = { matchingThreshold: 0.05 }
-): boolean {
+export function scanFrame(srcFrame: any, profile: VisionProfile): boolean {
   if (typeof cv === 'undefined') return false;
 
   let detected = false;
 
-  // Mats to be managed for memory cleanup
+  // Mats to cleanup
   let hsv: any = null;
-  let maskPurple: any = null;
-  let lowP: any = null;
-  let highP: any = null;
+  let maskDark: any = null;
   let contours: any = null;
   let hierarchy: any = null;
+  let lowP: any = null;
+  let highP: any = null;
   
   // Inner loop Mats
-  let roiWhite: any = null;
+  let roi: any = null;
+  let maskLight: any = null;
   let maskWhite: any = null;
+  let lowL: any = null;
+  let highL: any = null;
   let lowW: any = null;
   let highW: any = null;
 
   try {
-    // --- Step A: Segmentation (Color) ---
+    // --- Step 1: Background Segmentation ---
     hsv = new cv.Mat();
     cv.cvtColor(srcFrame, hsv, cv.COLOR_RGBA2RGB);
     cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-    // Apply strict Purple Bounds from Calibration
-    lowP = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), profile.hsvBounds.lower);
-    highP = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), profile.hsvBounds.upper);
-    maskPurple = new cv.Mat();
-    cv.inRange(hsv, lowP, highP, maskPurple);
+    lowP = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), profile.bounds.dark.lower);
+    highP = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), profile.bounds.dark.upper);
+    maskDark = new cv.Mat();
+    
+    cv.inRange(hsv, lowP, highP, maskDark);
 
-    // --- Step B: Contour Extraction ---
     contours = new cv.MatVector();
     hierarchy = new cv.Mat();
-    cv.findContours(maskPurple, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    cv.findContours(maskDark, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    const frameArea = srcFrame.cols * srcFrame.rows;
-    
-    // Calculate expected size based on profile coverage ratio
-    // We allow the object to be smaller/larger due to camera zoom or different resolutions,
-    // but the RELATIVE size should stay somewhat consistent. 
-    // We use a loose lower bound (50% of expected coverage).
-    const expectedArea = frameArea * profile.geometry.coverageRatio;
-    const minArea = expectedArea * 0.5;
-
-    // --- Step C: Geometric Filter ---
+    // --- Step 2: Spatial Lock & Verification ---
     for (let i = 0; i < contours.size(); ++i) {
       const contour = contours.get(i);
-      const area = cv.contourArea(contour);
       const rect = cv.boundingRect(contour);
-
-      // 1. Area Check
-      if (area < minArea) continue;
-
-      // 2. Aspect Ratio Check
-      const currentAspectRatio = rect.width / rect.height;
-      const targetAspectRatio = profile.geometry.aspectRatio;
       
-      // Calculate deviation percentage
-      const deviation = Math.abs(currentAspectRatio - targetAspectRatio) / targetAspectRatio;
-      
-      // Reject if shape differs by more than 30%
-      if (deviation > 0.3) continue;
+      // Calculate Normalized Geometry of Candidate
+      const normX = rect.x / srcFrame.cols;
+      const normY = rect.y / srcFrame.rows;
+      const normW = rect.width / srcFrame.cols;
+      const normH = rect.height / srcFrame.rows;
 
-      // --- Step D: Content Check (White Density) ---
-      // If we are here, we have a Purple Box of the correct shape.
-      // Now verify it contains "White Text".
-      
+      // SPATIAL LOCK: Check deviation from profile (Tolerance: 15%)
+      const target = profile.spatial.normalizedBox;
+      const xDiff = Math.abs(normX - target.x);
+      const yDiff = Math.abs(normY - target.y);
+      const wDiff = Math.abs(normW - target.w);
+      const hDiff = Math.abs(normH - target.h);
+
+      if (xDiff > 0.15 || yDiff > 0.15 || wDiff > 0.15 || hDiff > 0.15) {
+        continue; // REJECT: Not in the correct position/size
+      }
+
+      // --- Step 3: Triad Check (Internal Validation) ---
+      // We have the body, now check for "Light Purple" and "White Text" inside
       try {
-        roiWhite = hsv.roi(rect);
+        roi = hsv.roi(rect);
+        const area = rect.width * rect.height;
+
+        // Check A: Menu Light (Header/Selection)
+        lowL = new cv.Mat(roi.rows, roi.cols, roi.type(), profile.bounds.light.lower);
+        highL = new cv.Mat(roi.rows, roi.cols, roi.type(), profile.bounds.light.upper);
+        maskLight = new cv.Mat();
+        cv.inRange(roi, lowL, highL, maskLight);
         
-        // Define White: Low Saturation (< 60), High Value (> 180)
-        lowW = new cv.Mat(roiWhite.rows, roiWhite.cols, roiWhite.type(), [0, 0, 180, 0]);
-        highW = new cv.Mat(roiWhite.rows, roiWhite.cols, roiWhite.type(), [180, 60, 255, 255]);
+        const lightCount = cv.countNonZero(maskLight);
+        const lightRatio = lightCount / area;
+
+        // Check B: Text White
+        lowW = new cv.Mat(roi.rows, roi.cols, roi.type(), profile.bounds.white.lower);
+        highW = new cv.Mat(roi.rows, roi.cols, roi.type(), profile.bounds.white.upper);
         maskWhite = new cv.Mat();
-        
-        cv.inRange(roiWhite, lowW, highW, maskWhite);
+        cv.inRange(roi, lowW, highW, maskWhite);
 
-        const whitePixels = cv.countNonZero(maskWhite);
-        const density = whitePixels / area;
+        const whiteCount = cv.countNonZero(maskWhite);
+        const whiteRatio = whiteCount / area;
 
-        // Cleanup inner loop objects immediately
+        // RULE: Both must be present (> 1% coverage)
+        if (lightRatio > 0.01 && whiteRatio > 0.01) {
+          detected = true;
+          // Cleanup loop vars before breaking
+          maskLight.delete(); maskWhite.delete();
+          lowL.delete(); highL.delete();
+          lowW.delete(); highW.delete();
+          roi.delete();
+          // Clear refs to prevent double delete in finally
+          maskLight = null; maskWhite = null; roi = null;
+          break; 
+        }
+
+        // Cleanup if not detected
+        maskLight.delete(); maskLight = null;
         maskWhite.delete(); maskWhite = null;
+        lowL.delete(); lowL = null;
+        highL.delete(); highL = null;
         lowW.delete(); lowW = null;
         highW.delete(); highW = null;
-        roiWhite.delete(); roiWhite = null;
+        roi.delete(); roi = null;
 
-        if (density > config.matchingThreshold) {
-          detected = true;
-          break; // Found it!
-        }
-      } catch (e) {
-        console.warn("Error during ROI check", e);
-        // Ensure cleanup if error occurred in loop
-        if (maskWhite) { maskWhite.delete(); maskWhite = null; }
-        if (lowW) { lowW.delete(); lowW = null; }
-        if (highW) { highW.delete(); highW = null; }
-        if (roiWhite) { roiWhite.delete(); roiWhite = null; }
+      } catch (err) {
+        console.warn("ROI Check Error", err);
       }
     }
+
   } catch (err) {
-    console.error("scanFrame Error:", err);
+    console.error("scanFrame Error", err);
   } finally {
-    // --- Cleanup ---
     if (hsv) hsv.delete();
-    if (maskPurple) maskPurple.delete();
-    if (lowP) lowP.delete();
-    if (highP) highP.delete();
+    if (maskDark) maskDark.delete();
     if (contours) contours.delete();
     if (hierarchy) hierarchy.delete();
+    if (lowP) lowP.delete();
+    if (highP) highP.delete();
     
-    // Double check inner loop vars are gone
-    if (roiWhite) roiWhite.delete();
+    // Ensure inner loop mats are gone if error/break occurred
+    if (roi) roi.delete();
+    if (maskLight) maskLight.delete();
     if (maskWhite) maskWhite.delete();
+    if (lowL) lowL.delete();
+    if (highL) highL.delete();
     if (lowW) lowW.delete();
     if (highW) highW.delete();
   }
