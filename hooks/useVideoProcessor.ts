@@ -44,9 +44,7 @@ export const useVideoProcessor = () => {
           console.debug('[FFmpeg]', message);
         });
 
-        // Load the core
-        // We use unpkg/esm.sh generic paths or specific CDN URLs for the WASM core
-        // The default load() usually fetches from unpkg if no args provided
+        // Load the core using Blob URLs to bypass CORS/COOP/COEP issues
         const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
         
         await ffmpeg.load({
