@@ -2,12 +2,23 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { VideoDropZone } from './components/VideoDropZone';
 import { VideoPreview } from './components/VideoPreview';
 import { ReferenceImageDropZone } from './components/ReferenceImageDropZone';
+import { ResultsPanel } from './components/ResultsPanel';
 import { VideoAsset, ReferenceAsset } from './types';
-import { Clapperboard } from 'lucide-react';
+import { Clapperboard, Play, Sparkles } from 'lucide-react';
+import { Button } from './components/Button';
+import { useVisionEngine } from './hooks/useVisionEngine';
 
 const App: React.FC = () => {
   const [activeAsset, setActiveAsset] = useState<VideoAsset | null>(null);
   const [referenceAsset, setReferenceAsset] = useState<ReferenceAsset | null>(null);
+  
+  const { 
+    isProcessing, 
+    progress, 
+    status, 
+    detections, 
+    processVideo 
+  } = useVisionEngine();
 
   // Critical Memory Management: Cleanup object URL when component unmounts or asset changes
   useEffect(() => {
@@ -34,6 +45,14 @@ const App: React.FC = () => {
     setActiveAsset(null); 
   }, []);
 
+  const handleStartProcessing = () => {
+    if (activeAsset && referenceAsset) {
+      processVideo(activeAsset.previewUrl, referenceAsset.previewUrl);
+    } else {
+      alert("Please upload both video footage and a reference screenshot.");
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col">
       {/* Navbar */}
@@ -45,13 +64,13 @@ const App: React.FC = () => {
             </div>
             <h1 className="text-xl font-bold text-slate-100 tracking-tight">Studio<span className="text-blue-500">Ingest</span></h1>
           </div>
-          <div className="text-sm text-slate-500">v1.1.0</div>
+          <div className="text-sm text-slate-500">v1.2.0</div>
         </div>
       </header>
 
       {/* Main Content */}
       <main className="flex-1 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 w-full">
-        <div className="max-w-5xl mx-auto">
+        <div className="max-w-6xl mx-auto">
           <div className="text-center mb-10 space-y-2">
             <h2 className="text-3xl font-bold text-slate-100">
               {activeAsset ? 'Review Footage & Targets' : 'Import Source Footage'}
@@ -64,12 +83,21 @@ const App: React.FC = () => {
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
-            {/* Left Column: Video */}
-            <div className="lg:col-span-2 transition-all duration-300">
+            {/* Left Column: Video & Results */}
+            <div className="lg:col-span-2 space-y-8 transition-all duration-300">
               {activeAsset ? (
                 <VideoPreview asset={activeAsset} onRemove={handleRemoveVideo} />
               ) : (
                 <VideoDropZone onFileSelected={handleFileSelected} />
+              )}
+              
+              {/* Results Section */}
+              {status !== 'idle' && (
+                <ResultsPanel 
+                  status={status} 
+                  progress={progress} 
+                  detections={detections} 
+                />
               )}
             </div>
 
@@ -79,7 +107,7 @@ const App: React.FC = () => {
                 <h3 className="font-semibold text-slate-200 mb-4">Vision Settings</h3>
                 <ReferenceImageDropZone onImageLoaded={handleReferenceSelected} />
                 
-                <div className="mt-6 pt-6 border-t border-slate-800">
+                <div className="mt-6 pt-6 border-t border-slate-800 space-y-4">
                   <div className="text-xs text-slate-500 space-y-2">
                     <p>
                       <span className="font-medium text-slate-400">Status:</span>{' '}
@@ -89,9 +117,24 @@ const App: React.FC = () => {
                       }
                     </p>
                     <p>
-                      Upload a reference screenshot to enable the VisionEngine to track specific UI elements or objects within the footage.
+                      The engine will scan every 0.5s for the provided visual fingerprint.
                     </p>
                   </div>
+                  
+                  <Button 
+                    className="w-full flex items-center justify-center gap-2" 
+                    disabled={!activeAsset || !referenceAsset || isProcessing}
+                    onClick={handleStartProcessing}
+                  >
+                    {isProcessing ? (
+                      <>Processing...</>
+                    ) : (
+                      <>
+                        <Sparkles size={16} />
+                        Run VisionEngine
+                      </>
+                    )}
+                  </Button>
                 </div>
               </div>
             </div>
